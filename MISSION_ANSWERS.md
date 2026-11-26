@@ -69,7 +69,108 @@ content-type: application/json
 
 ## Part 2: Docker
 
-*(Đang chờ kết quả chạy Bước 2)*
+### Exercise 2.1: Dockerfile questions (`02-docker/develop/Dockerfile`)
+
+1. **Base image:** `python:3.11` (`02-docker/develop/Dockerfile:8`) — đây là image Python đầy đủ (full distribution, nặng ~1 GB).
+2. **Working directory:** `/app` (`02-docker/develop/Dockerfile:11`) — mọi lệnh `COPY`, `RUN`, `CMD` phía sau đều chạy tương đối từ `/app`.
+3. **Tại sao `COPY requirements.txt` trước `COPY app.py`:** Để tận dụng **Docker layer cache**. Docker cache từng layer theo thứ tự từ trên xuống dưới; khi mã nguồn (`app.py`) thay đổi nhưng `requirements.txt` giữ nguyên, Docker sẽ dùng lại cache của bước `RUN pip install --no-cache-dir -r requirements.txt` mà không phải tải và cài lại toàn bộ thư viện.
+4. **`CMD` vs `ENTRYPOINT` khác nhau thế nào:**
+   - `CMD` cung cấp lệnh và tham số mặc định khi container khởi động, nhưng **dễ dàng bị ghi đè** nếu truyền lệnh mới ở cuối `docker run <image> <cmd>`.
+   - `ENTRYPOINT` cố định tiến trình/lệnh chính của container; các tham số truyền thêm trong `docker run` hoặc `CMD` sẽ được gắn nối vào sau `ENTRYPOINT` (chỉ bị ghi đè khi dùng cờ `--entrypoint`).
+
+---
+
+### Exercise 2.2: Build và chạy container bản `develop`
+
+```http
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:05:30 GMT
+server: uvicorn
+content-length: 103
+content-type: application/json
+
+{"answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!"}
+```
+
+---
+
+### Exercise 2.3: Multi-stage build & so sánh kích thước image
+
+**Phân tích `02-docker/production/Dockerfile`:**
+- **Stage 1 (`builder` từ `python:3.11-slim`):** Cài trình biên dịch và thư viện hệ thống (`gcc`, `libpq-dev`), rồi chạy `pip install --no-cache-dir --user -r requirements.txt` để cài các gói Python vào `/root/.local`.
+- **Stage 2 (`runtime` từ `python:3.11-slim`):** Tạo user non-root (`appuser`), chỉ `COPY --from=builder /root/.local /home/appuser/.local`, copy mã nguồn (`main.py`, `utils/mock_llm.py`), khai báo `HEALTHCHECK` gọi `/health` và chạy `uvicorn` dưới quyền `appuser`.
+- **Tại sao image nhỏ hơn:**
+  1. Dùng base `python:3.11-slim` gọn nhẹ thay vì `python:3.11` full.
+  2. Toàn bộ build tools (`gcc`, `libpq-dev`, cache build) bị bỏ lại ở stage `builder`, không đi theo sang stage `runtime` cuối cùng.
+
+**Kích thước đo được bằng `docker images | grep my-agent`:**
+```text
+my-agent:advanced                   bb15bad7fc5a        240MB         57.4MB
+my-agent:develop                    c3ca6d2e7a3b       1.67GB          426MB
+```
+- **Develop (`my-agent:develop`):** `1.67 GB` (~`1,670 MB`; content size `426 MB`)
+- **Production (`my-agent:advanced`):** `240 MB` (content size `57.4 MB`)
+- **Chênh lệch (giảm):** giảm **`1,430 MB` (~`85.6%`)** so với bản develop (và đạt yêu cầu `< 500 MB`).
+
+---
+
+### Exercise 2.4: Docker Compose stack (`02-docker/production/docker-compose.yml`)
+
+**Sơ đồ kiến trúc và giao tiếp các service (trên Docker bridge network `internal`):**
+
+```text
+Client (localhost:80)
+       │
+       ▼
+  ┌─────────┐   HTTP (proxy_pass http://agent_backend -> agent:8000)   ┌───────────────┐
+  │  nginx  │ ───────────────────────────────────────────────────────▶ │     agent     │
+  └─────────┘                                                          │  (port 8000)  │
+                                                                       └──────┬─┬──────┘
+                                                REDIS_URL=redis://redis:6379/0│ │QDRANT_URL=http://qdrant:6333
+                                                                              ▼ ▼
+                                                                     ┌────────┐ ┌────────┐
+                                                                     │ redis  │ │ qdrant │
+                                                                     │ :6379  │ │ :6333  │
+                                                                     └────────┘ └────────┘
+```
+
+- **Các service được khởi động:** `nginx` (reverse proxy, expose cổng `80`/`443`), `agent` (FastAPI app, chỉ mở nội bộ cổng `8000`, `depends_on` `redis` và `qdrant` ở trạng thái `service_healthy`), `redis` (`redis:7-alpine`, lưu volume `redis_data`), và `qdrant` (`qdrant/qdrant:v1.9.0`, lưu volume `qdrant_data`).
+- **Cách giao tiếp:** Các container dùng Docker DNS nội bộ qua tên service (`agent`, `redis`, `qdrant`) trong mạng `internal`; client bên ngoài chỉ đi qua `nginx` ở cổng 80.
+
+**Kết quả kiểm tra stack (`docker compose -p k5-day14-docker ps` & test qua Nginx):**
+```text
+NAME                       IMAGE                   COMMAND                  SERVICE   CREATED          STATUS                    PORTS
+k5-day14-docker-agent-1    k5-day14-docker-agent   "uvicorn main:app --…"   agent     35 seconds ago   Up 23 seconds (healthy)   8000/tcp
+k5-day14-docker-nginx-1    nginx:alpine            "/docker-entrypoint.…"   nginx     35 seconds ago   Up 23 seconds             0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp
+k5-day14-docker-qdrant-1   qdrant/qdrant:v1.9.0    "./entrypoint.sh"        qdrant    37 seconds ago   Up 34 seconds (healthy)   6333-6334/tcp
+k5-day14-docker-redis-1    redis:7-alpine          "docker-entrypoint.s…"   redis     37 seconds ago   Up 34 seconds (healthy)   6379/tcp
+```
+```http
+HTTP/1.1 200 OK
+Server: nginx
+Date: Thu, 26 Nov 2026 08:09:36 GMT
+Content-Type: application/json
+Content-Length: 96
+Connection: keep-alive
+X-Frame-Options: DENY
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1; mode=block
+
+{"status":"ok","uptime_seconds":32.9,"version":"2.0.0","timestamp":"2026-11-26T08:09:36.409957"}
+```
+```http
+HTTP/1.1 200 OK
+Server: nginx
+Date: Thu, 26 Nov 2026 08:09:55 GMT
+Content-Type: application/json
+Content-Length: 103
+Connection: keep-alive
+X-Frame-Options: DENY
+X-Content-Type-Options: nosniff
+X-XSS-Protection: 1; mode=block
+
+{"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
+```
 
 ---
 
