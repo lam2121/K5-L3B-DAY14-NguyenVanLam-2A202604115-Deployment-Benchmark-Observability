@@ -176,7 +176,28 @@ X-XSS-Protection: 1; mode=block
 
 ## Part 3: Cloud Deployment
 
-*(Đang chờ kết quả chạy Bước 6)*
+### Exercise 3.1 / 3.2: Deploy Agent Part 6 lên Cloud
+
+- **Nền tảng chính:** *(Đang chờ kết quả deploy ở Bước 6)*
+- **Public URL:** *(Đang chờ kết quả deploy ở Bước 6)*
+- **Ảnh chụp:** [dashboard.png](screenshots/dashboard.png), [running.png](screenshots/running.png), [test.png](screenshots/test.png)
+
+### So sánh `railway.toml` và `render.yaml` (`03-cloud-deployment/` & `06-lab-complete/`)
+
+| Tiêu chí | `railway.toml` | `render.yaml` | Vì sao khác nhau? |
+|---|---|---|---|
+| **Định dạng & phạm vi** | File **TOML** cấu hình cho **1 service** (`[build]`, `[deploy]`). | File **YAML** dạng Blueprint (IaC) khai báo **cả stack nhiều service** (`services:` gồm web service + Redis add-on). | Railway quản lý từng service trong project riêng lẻ trên Dashboard/CLI; Render cho phép định nghĩa toàn bộ hạ tầng (app + Redis) trong một Blueprint duy nhất. |
+| **Build & Runtime** | Dùng `builder = "DOCKERFILE"` (hoặc `"NIXPACKS"` trong bản mẫu), tự nhận `CMD` của Dockerfile. | Khai báo rõ `type: web`, `runtime: docker` (hoặc `python` với `buildCommand` + `startCommand`), `region`, `plan`. | Render Blueprint yêu cầu mô tả đầy đủ thông số máy chủ (`plan`, `region`) để cấp phát tài nguyên tự động. |
+| **Health check** | `healthcheckPath = "/health"`, `healthcheckTimeout = 30`, `restartPolicyType = "ON_FAILURE"`. | `healthCheckPath: /health`, `autoDeploy: true`. | Cả hai đều dùng endpoint `/health` để xác định service sống hay cần restart / giữ traffic khi zero-downtime deploy. |
+| **Biến môi trường & Secret** | Không khai báo secret trong file TOML; đặt qua `railway variables set` hoặc Dashboard. | Khai báo danh sách `envVars:` trực tiếp trong YAML, với secret dùng `generateValue: true` (tự sinh) hoặc `sync: false` (nhập trên Dashboard, không commit vào Git). | Render Blueprint cần biết trước schema các biến môi trường cần tạo khi khởi tạo stack từ Git repo, đồng thời tránh hardcode secret vào YAML. |
+
+### Exercise 3.3: Pipeline CI/CD trên Google Cloud Run (`03-cloud-deployment/production-cloud-run/`)
+
+Đọc `cloudbuild.yaml` và `service.yaml`, pipeline CI/CD tự động khi push lên nhánh `main` đi qua **4 bước tuần tự (`waitFor`)**:
+1. **Test (`test`):** Dùng container `python:3.11-slim` cài `requirements.txt` + `pytest` và chạy toàn bộ test (`pytest tests/ -v --tb=short`); nếu test fail thì dừng pipeline ngay.
+2. **Build (`build`):** Dùng `cloud-builders/docker` build image gắn 2 tag (`$COMMIT_SHA` và `latest`), có tận dụng `--cache-from` từ image `latest` để tăng tốc build.
+3. **Push (`push`):** Đẩy cả 2 tag image lên Google Container Registry (`gcr.io/$PROJECT_ID/ai-agent`).
+4. **Deploy (`deploy`):** Dùng `gcloud run deploy` cập nhật service `ai-agent` trên Cloud Run (`asia-southeast1`, `min-instances=1`, `max-instances=10`, `512Mi` RAM, `1` CPU), cấu hình cấu trúc scaling/liveness (`/health`)/startup (`/ready`) tương ứng như trong `service.yaml`, và inject secret (`OPENAI_API_KEY`, `AGENT_API_KEY`) an toàn từ **Google Secret Manager** thay vì hardcode.
 
 ---
 
@@ -362,10 +383,37 @@ Total messages: 10
 
 ## Part 6: Final Project (`06-lab-complete/`)
 
-*(Đang chờ kết quả chạy `check_production_ready.py` ở Bước 5)*
+Chạy `python3 check_production_ready.py` (chế độ đầy đủ trên WSL2 Ubuntu có Docker `29.5.3`, build image `69 MB`, Docker `docker stop` tắt êm `exit code 0, 0.7s`, 17 dòng log JSON hợp lệ):
+
+```text
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
+```
 
 ---
 
 ## AI Log
 
-*(Sẽ cập nhật đầy đủ các phần có sử dụng AI hỗ trợ khi hoàn thiện lab)*
+1. **Part 6 (`06-lab-complete/`):**
+   - **Hỏi / Yêu cầu AI:** Hướng dẫn hoàn thiện các `TODO` trong bộ khung `06-lab-complete/` (`config.py`, `redis_client.py`, `auth.py`, `rate_limiter.py`, `cost_guard.py`, `main.py`, `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `.env.example`, `railway.toml`, `render.yaml`) và xử lý lỗi cài `pydantic==2.9.0` trên Ubuntu Python 3.14 trong venv local.
+   - **Nhận được:** Mã nguồn triển khai từng module theo 12 tiêu chí (Redis Sorted Set sliding window cho rate limit, `INCRBYFLOAT` theo ngày/tháng cho cost guard, `hmac.compare_digest` cho API key, `JsonFormatter` cho log, multi-stage `python:3.11-slim` + non-root `appuser` + `exec uvicorn`).
+   - **Tự kiểm tra & xác nhận:** Đã chạy `python3 check_production_ready.py` trực tiếp trên WSL2 Ubuntu với Docker Desktop, tự kiểm chứng đủ 43/43 checks (`PASS 12/12`, image `69 MB`, `SIGTERM` exit code `0`, `docker stop` `0.7s`).
+2. **Part 1–5 (`MISSION_ANSWERS.md`):**
+   - **Hỏi / Yêu cầu AI:** Hướng dẫn từng bước lệnh thực hành và tổng hợp các câu trả lời/bảng đối chiếu từ kết quả chạy thật trên máy.
+   - **Tự kiểm tra & xác nhận:** Toàn bộ kết quả `curl`, dung lượng image `docker images` (`1.67 GB` vs `240 MB`), output `401/200/429`, log `SIGTERM` và output `test_stateless.py` (3 instance + 10 messages trong Redis) đều do tự chạy lệnh và đối chiếu trực tiếp.
