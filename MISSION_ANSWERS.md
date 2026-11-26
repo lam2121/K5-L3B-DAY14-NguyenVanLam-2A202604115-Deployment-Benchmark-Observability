@@ -284,7 +284,79 @@ referrer-policy: strict-origin-when-cross-origin
 
 ## Part 5: Scaling & Reliability
 
-*(Đang chờ kết quả chạy Bước 4)*
+### Exercise 5.1 & 5.2: Health Checks (`/health`, `/ready`) và Graceful Shutdown (`05-scaling-reliability/develop/app.py`)
+
+- **Phân biệt Liveness (`/health`) và Readiness (`/ready`):**
+  - `GET /health` (**Liveness probe**) trả lời *"Process còn sống không?"*: luôn trả `200` khi tiến trình HTTP server còn chạy (không phụ thuộc Redis/DB bên ngoài). Nếu fail, platform sẽ **restart** container.
+  - `GET /ready` (**Readiness probe**) trả lời *"Instance đã sẵn sàng nhận traffic chưa?"*: kiểm tra cờ sẵn sàng (startup xong, chưa vào giai đoạn shutdown) và kết nối dependency (Redis/DB). Trả `503` khi chưa sẵn sàng để load balancer **tạm ngưng chuyển request mới** tới instance đó mà không restart container một cách vô ích.
+- **Cơ chế Graceful Shutdown khi nhận `SIGTERM`:**
+  1. Orchestrator gửi `SIGTERM` (signal 15) khi dừng/deploy container mới.
+  2. Uvicorn bắt `SIGTERM`, kích hoạt phần shutdown của `lifespan` (`_is_ready = False`) để ngừng nhận request mới.
+  3. Server chờ các request đang chạy dở (`_in_flight_requests`) hoàn thành (tối đa `timeout_graceful_shutdown=30`s) rồi mới thoát sạch với exit code 0.
+
+**Kết quả test thực tế (`05-scaling-reliability/develop/app.py`):**
+```http
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:30:10 GMT
+server: uvicorn
+content-length: 186
+content-type: application/json
+
+{"status":"ok","uptime_seconds":22.0,"version":"1.0.0","environment":"development","timestamp":"2026-11-26T08:30:11.111773+00:00","checks":{"memory":{"status":"ok","used_percent":13.2}}}
+```
+```http
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:30:17 GMT
+server: uvicorn
+content-length: 37
+content-type: application/json
+
+{"ready":true,"in_flight_requests":1}
+```
+```text
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-11-26 08:30:30,105 INFO 🔄 Graceful shutdown initiated...
+2026-11-26 08:30:30,106 INFO ✅ Shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3917]
+2026-11-26 08:30:30,107 INFO Received signal 15 — uvicorn will handle graceful shutdown
+```
+
+---
+
+### Exercise 5.3, 5.4 & 5.5: Stateless Design, Nginx Load Balancing (3 instances) & Redis
+
+- **Vì sao state trong RAM bị hỏng khi chạy nhiều instance:** Mỗi container/worker có vùng nhớ riêng (`_memory_store`). Khi Nginx cân bằng tải theo round-robin, request 1 rơi vào `agent-1` nhưng request 2 rơi vào `agent-2` sẽ không thấy lịch sử hội thoại cũ. Lưu `session:{session_id}` vào **Redis** dùng chung giúp mọi instance đều đọc/ghi cùng một state (`Stateless`).
+- **Kết quả chạy 3 agent instances (`docker compose -p k5-day14-scaling up -d --build --scale agent=3`) + `python3 test_stateless.py`:**
+  - Cả 3 instance (`agent-1`, `agent-2`, `agent-3`), `nginx` và `redis` đều lên khỏe mạnh.
+  - 5 request trong cùng `Session ID: 25827bb1-c1b6-45bc-a18c-cb82c23ffa80` được Nginx phân tán luân phiên tới cả 3 instance (`instance-f71022`, `instance-16cde5`, `instance-dbb091`).
+  - Khi gọi `GET /chat/{session_id}/history`, Redis trả về đầy đủ **10 messages** (5 lượt hỏi/đáp), chứng minh không mất dữ liệu dù request đi qua nhiều instance khác nhau.
+
+```text
+NAME                       IMAGE                    COMMAND                  SERVICE   CREATED          STATUS                    PORTS
+k5-day14-scaling-agent-1   k5-day14-scaling-agent   "python -m uvicorn a…"   agent     25 seconds ago   Up 12 seconds (healthy)   8000/tcp
+k5-day14-scaling-agent-2   k5-day14-scaling-agent   "python -m uvicorn a…"   agent     25 seconds ago   Up 12 seconds (healthy)   8000/tcp
+k5-day14-scaling-agent-3   k5-day14-scaling-agent   "python -m uvicorn a…"   agent     25 seconds ago   Up 12 seconds (healthy)   8000/tcp
+k5-day14-scaling-nginx-1   nginx:alpine             "/docker-entrypoint.…"   nginx     24 seconds ago   Up 11 seconds             0.0.0.0:8080->80/tcp, [::]:8080->80/tcp
+k5-day14-scaling-redis-1   redis:7-alpine           "docker-entrypoint.s…"   redis     25 seconds ago   Up 23 seconds (healthy)   6379/tcp
+```
+```text
+Session ID: 25827bb1-c1b6-45bc-a18c-cb82c23ffa80
+Request 1: [instance-f71022] -> What is Docker?
+Request 2: [instance-16cde5] -> Why do we need containers?
+Request 3: [instance-dbb091] -> What is Kubernetes?
+Request 4: [instance-f71022] -> How does load balancing work?
+Request 5: [instance-16cde5] -> What is Redis used for?
+
+Total requests: 5
+Instances used: {'instance-f71022', 'instance-dbb091', 'instance-16cde5'}
+✅ All requests served despite different instances!
+
+--- Conversation History ---
+Total messages: 10
+✅ Session history preserved across all instances via Redis!
+```
 
 ---
 
