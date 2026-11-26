@@ -182,7 +182,103 @@ X-XSS-Protection: 1; mode=block
 
 ## Part 4: API Security
 
-*(Đang chờ kết quả chạy Bước 3)*
+### Exercise 4.1: API Key Authentication (`04-api-gateway/develop/app.py`)
+
+- **Kiểm tra API key ở đâu:** Hàm `verify_api_key` (`develop/app.py:39-54`) đọc header `X-API-Key` thông qua `APIKeyHeader(name="X-API-Key", auto_error=False)` và được gắn làm dependency `Depends(verify_api_key)` trên `POST /ask` (`develop/app.py:67-71`), so sánh với `API_KEY = os.getenv("AGENT_API_KEY", ...)`.
+- **Điều gì xảy ra nếu thiếu hoặc sai key:** Thiếu header trả `401 Unauthorized` (`Missing API key...`), sai key trả `403 Forbidden` (`Invalid API key.`).
+- **Cách rotate key:** Thay đổi giá trị biến môi trường `AGENT_API_KEY` trên nền tảng/config và reload/restart service; trong hệ thống production thực tế nên hỗ trợ danh sách nhiều key hợp lệ (ví dụ active key + previous key trong khoảng chuyển tiếp) để không ngắt request của client đang dùng key cũ khi xoay vòng.
+
+**Kết quả test thực tế (không có key → 401; có key → 200):**
+```http
+HTTP/1.1 401 Unauthorized
+date: Thu, 26 Nov 2026 08:17:41 GMT
+server: uvicorn
+content-length: 67
+content-type: application/json
+
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
+```
+```http
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:17:51 GMT
+server: uvicorn
+content-length: 122
+content-type: application/json
+
+{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
+```
+
+---
+
+### Exercise 4.2 & 4.3: JWT Authentication & Rate Limiting (`04-api-gateway/production/`)
+
+- **JWT Flow (`POST /auth/token` → `POST /ask`):** Client gửi `username`/`password` (`student` / `demo123`) tới `POST /auth/token` để nhận `access_token` (JWT ký bằng HMAC-SHA256, thời hạn 60 phút, chứa thông tin `sub` và `role`). Khi gọi `POST /ask` kèm header `Authorization: Bearer <TOKEN_REDACTED>`, dependency `verify_token` giải mã và xác minh chữ ký/hạn dùng của token mà không cần tra database mỗi request.
+- **Thuật toán & cấu hình Rate Limiting (`rate_limiter.py:17-87`):**
+  - Thuật toán: **Sliding Window Counter** (dùng `collections.deque` lưu danh sách timestamp của từng `user_id`; mỗi lần gọi xóa các timestamp cũ hơn `now - 60s` rồi kiểm tra độ dài).
+  - Giới hạn: `student` (role `user`) tối đa **10 requests / 60 giây** (`rate_limiter_user`), còn `admin` tối đa **100 requests / 60 giây** (`rate_limiter_admin`). Có thể cấu hình bypass hoặc nới hạn mức cho role `admin` dựa vào `user["role"]` đã giải mã từ JWT (`production/app.py:141`).
+  - Trong môi trường multi-worker / nhiều container cần chuyển state từ RAM sang **Redis** (như Part 6 dùng Redis Sorted Set `ZREMRANGEBYSCORE` + `ZCARD` + `ZADD`).
+
+**Kết quả test JWT (200 OK) và vòng lặp vượt ngưỡng Rate Limit (429 Too Many Requests):**
+*(Token đã được che trước khi lưu)*
+```bash
+# Lấy token tại POST /auth/token với {"username": "student", "password": "demo123"}
+# Gọi với Authorization: Bearer <REDACTED_JWT>
+```
+```http
+=== Test 200 với JWT ===
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:22:10 GMT
+server: uvicorn
+content-length: 215
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"question":"Explain JWT","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic.","usage":{"requests_remaining":9,"budget_remaining_usd":2.1e-05}}
+```
+```http
+--- Request 9 (request thứ 10 trong cửa sổ 60s) ---
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 08:22:30 GMT
+server: uvicorn
+content-length: 180
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"question":"Test 9","answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé.","usage":{"requests_remaining":0,"budget_remaining_usd":0.000181}}
+
+--- Request 10 (vượt 10 req/phút -> bị chặn 429) ---
+HTTP/1.1 429 Too Many Requests
+date: Thu, 26 Nov 2026 08:22:30 GMT
+server: uvicorn
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795681410
+retry-after: 41
+content-length: 98
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":41}}
+```
+
+---
+
+### Exercise 4.4: Cost Guard (`04-api-gateway/production/cost_guard.py`)
+
+- **Tại sao cần cả Rate Limit và Cost Guard:** Rate limit chỉ giới hạn **tốc độ gọi** (số request/phút), nhưng mỗi prompt dài có thể tốn gấp hàng chục lần token so với prompt ngắn. Ngược lại, một user gọi đều đặn dưới ngưỡng rate limit vẫn có thể đốt hết tiền API theo ngày/tháng. Vì vậy cần **Cost Guard** để giới hạn **tổng chi phí theo token**.
+- **Cách triển khai trong `cost_guard.py:20-110`:**
+  1. **Trước khi gọi LLM (`check_budget(user_id)`):** Kiểm tra tổng chi phí trong ngày ở 2 tầng: global budget (`global_daily_budget_usd = $10.0`, vượt → `503`) và per-user budget (`daily_budget_usd = $1.0`, vượt → **`402 Payment Required`**); ghi log cảnh báo khi đạt `80%` ngưỡng (`warn_at_pct`).
+  2. **Sau khi gọi LLM (`record_usage(user_id, input_tokens, output_tokens)`):** Tính chi phí từ số token vào/ra (`$0.00015 / 1K input tokens`, `$0.0006 / 1K output tokens`) rồi cộng dồn vào usage theo ngày (`YYYY-MM-DD`) của user và tổng global.
+  3. **Khi đưa lên production (nhiều worker/instance):** Chuyển bộ đếm `budget:{user_id}:{YYYY-MM}` hoặc `budget:daily:{YYYY-MM-DD}` sang **Redis** dùng `INCRBYFLOAT` + `EXPIRE` để mọi instance dùng chung một ngân sách chính xác.
 
 ---
 
