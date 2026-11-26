@@ -178,8 +178,9 @@ X-XSS-Protection: 1; mode=block
 
 ### Exercise 3.1 / 3.2: Deploy Agent Part 6 lên Cloud
 
-- **Nền tảng chính:** *(Đang chờ kết quả deploy ở Bước 6)*
-- **Public URL:** *(Đang chờ kết quả deploy ở Bước 6)*
+- **Nền tảng chính:** Render (Web Service Docker từ `06-lab-complete/` + Render Key Value Redis)
+- **Public URL:** https://k5-l3b-day14-nguyenvanlam-2a202604115.onrender.com
+- **Kiểm tra tự động:** `python3 check_production_ready.py --public-url "https://k5-l3b-day14-nguyenvanlam-2a202604115.onrender.com"` → `Public URL: GET .../health → 200` (`✅`), cùng 4 lệnh `curl` ở CP6 (`/health` → 200, `/ready` → 200, `/ask` không key → 401, `/ask` có key → 200).
 - **Ảnh chụp:** [dashboard.png](screenshots/dashboard.png), [running.png](screenshots/running.png), [test.png](screenshots/test.png)
 
 ### So sánh `railway.toml` và `render.yaml` (`03-cloud-deployment/` & `06-lab-complete/`)
